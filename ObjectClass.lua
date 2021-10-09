@@ -19,9 +19,10 @@ function object_pool:register(class_type)
     self.object_dic[class_type] = {}
 end
 
-function object_pool:release(obj)
+function object_pool:recycle(obj)
     local pool = self.object_dic[obj._class_type]
     pool[#pool + 1] = obj
+    --print("set object to pool",obj.name)
 end
 
 function object_pool:claim(class_type,...)
@@ -38,10 +39,10 @@ function object_pool:claim(class_type,...)
                     create(c.super, ...)
                 end
                 if c.ctor then
-                    c.ctor(c, ...)
+                    c.ctor(obj, ...)
                 end
             end
-            create(obj, ...)
+            create(class_type, ...)
         end
         --print("get object from pool")
         return obj
@@ -71,7 +72,7 @@ function object_pool:claim(class_type,...)
         end
 
         -- 注册release方法
-        obj.__release = function(self)
+        obj.__recycle = function(self)
             local now_super = self._class_type
             while now_super ~= nil do
                 if now_super.__release then
@@ -79,7 +80,7 @@ function object_pool:claim(class_type,...)
                 end
                 now_super = now_super.super
             end
-            object_pool:release(self)
+            object_pool:recycle(self)
         end
         return obj
     end
@@ -131,13 +132,12 @@ function baseClass:ctor(a,b)
     self.b = b
 end
 
-function baseClass:print()
-    print(self.name,self.a,self.b)
+function baseClass:add()
+    print(self.name,"add",self.a + self.b)
 end
 
-function baseClass:release()
+function baseClass:__release()
     print("baseClass:release()")
-    self:__release()
 end
 
 local classA = object_class("classA",baseClass)
@@ -148,12 +148,11 @@ function classA:ctor(a,b)
     self.b = b
 end
 
-function classA:release()
+function classA:__release()
     print("classA:release()")
-    self:__release()
 end
 
-local classB = object_class("classB",baseClass)
+local classB = object_class("classB",classA)
 function classB:ctor(a,b)
     print("classB:ctor()",a,b)
     self.name = "classB"
@@ -161,12 +160,11 @@ function classB:ctor(a,b)
     self.b = b
 end
 
-function classB:release()
+function classB:__release()
     print("classB:release()")
-    self:__release()
 end
 
-local classC = object_class("classC",baseClass)
+local classC = object_class("classC",classB)
 function classC:ctor(a,b)
     print("classC:ctor()",a,b)
     self.name = "classC"
@@ -174,15 +172,37 @@ function classC:ctor(a,b)
     self.b = b
 end
 
-function classC:release()
-    print("classC:release()")
-    self:__release()
+function classC:add()
+    print("show add only")
 end
 
-local c = classC.new(100,59)
-c:print()
-c:release()
+function classC:__release()
+    print("classC:release()")
+end
 
-local cc = classC.new(100,59)
-cc:print()
+local test_num = 1000
+for i = 1,test_num,1 do
+    local c = classC.new(i,i)
+    c:__recycle()
+end
+assert(#object_pool.object_dic[classC] == 1,string.format("#v = %s" , #object_pool.object_dic[classC] ))
+
+local list = {}
+for i = 1,test_num,1 do
+    list[#list + 1] = classC.new(i,i)
+end
+
+for i = 1,test_num,1 do
+    list[i]:__recycle()
+end
+
+assert(#object_pool.object_dic[classC] == test_num,string.format("#v = %s" , #object_pool.object_dic[classC] ))
+
+local b = classB.new(100,59)
+b:add()
+b:__recycle()
+local c = classC.new(100,59)
+c:add()
+c:__recycle()
+c = classC.new(100,59)
 --]]
