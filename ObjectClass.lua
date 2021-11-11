@@ -22,6 +22,15 @@ end
 function object_pool:recycle(obj)
     local pool = self.object_dic[obj._class_type]
     pool[#pool + 1] = obj
+    --[[
+    for k,v in pairs(obj) do
+        if k ~= '_class_type' and k ~= '__type' and k ~= '__recycle' and k ~= 'name' then
+            if obj._class_type[k] ~= v then
+                printRed("recycle diff",obj.class_name,k,v,obj._class_type[k] )
+            end
+        end
+    end
+    --]]
     --print("set object to pool",obj.name)
 end
 
@@ -52,11 +61,39 @@ function object_pool:claim(class_type,...)
         obj.class_name = class_type.class_name
         obj._class_type = class_type
         obj.__type = _class_type.instance
+        local virtual_table = _class[class_type]
+        local get = rawget(virtual_table,"Get")
+        local set = rawget(virtual_table,"Set")
+        local m_table = {
+            -- TODO 考虑要不要把将被销毁的对象放到对象池中
+            __gc = function(self)
+                printRed("~~~~~~~~~~~~~~~~object class gc",self.class_name,self.name)
+            end
+        }
+        -- 如果定义了get set 方法
+        if get then
+            m_table.__index = function(t,k)
+                if get[k] then
+                    return get[k](t)
+                end
+                return virtual_table[k]
+            end
+            m_table.__newindex = function(t,k,v)
+                if set and set[k] then
+                    set[k](t,v)
+                elseif get[k] ~= nil then
+                    print("error 正在覆盖被禁止写的字段 ",k,v)
+                else
+                    rawset(t,k,v)
+                end
+            end
+        else
+            -- 正常模式下，只需要注册基类方法
+            m_table.__index = virtual_table
+        end
+        -- 设置源表
+        setmetatable(obj,m_table)
 
-        -- 在初始化之前注册基类方法
-        setmetatable(obj, {
-            __index = _class[class_type],
-        })
         -- 调用初始化方法
         do
             local create
@@ -71,7 +108,7 @@ function object_pool:claim(class_type,...)
             create(class_type, ...)
         end
 
-        -- 注册release方法
+        -- 注册recycle方法
         obj.__recycle = function(self)
             local now_super = self._class_type
             while now_super ~= nil do
@@ -93,10 +130,13 @@ function object_class(class_name,super)
     -- 在创建对象的时候自动调用
     class_type.class_name = class_name
     class_type.super = super
+    class_type.name = class_name
     class_type.new = function(...)
         return object_pool:claim(class_type,...)
     end
 
+    local get = {}
+    local set = {}
     local virtual_table = {}
     assert(_class[class_type] == nil, "Already defined class : ", class_name)
     _class[class_type] = virtual_table
@@ -107,16 +147,50 @@ function object_class(class_name,super)
             virtual_table[k] = v
         end
     ,
-        __index = virtual_table,
+        __index = function(t,k)
+            local v = virtual_table[k]
+            if k == "Get" then
+                rawset(virtual_table,k,get)
+                return get
+            elseif k == "Set" then
+                rawset(virtual_table,k,set)
+                return set
+            else
+                return v
+            end
+        end,
     })
 
     if super then
         setmetatable(virtual_table, {
             __index = function(t,k)
-                local ret = _class[super][k]
-                return ret
+                if k == "Get" then
+                    return rawget(virtual_table,"Get")
+                elseif k == "Set" then
+                    return rawget(virtual_table,"Set")
+                else
+                    return _class[super][k]
+                end
             end
         })
+        local super_get = rawget(_class[super],"Get")
+        if super_get then
+            for k, v in pairs(super_get) do
+                if get[k] == nil and type(v) == "function" then
+                    get[k] = v
+                end
+            end
+            rawset(virtual_table,"Get",get)
+        end
+        local super_set = rawget(_class[super],"Set")
+        if super_set then
+            for k, v in pairs(super_set) do
+                if set[k] == nil and type(v) == "function" then
+                    set[k] = v
+                end
+            end
+            rawset(virtual_table,"Set",set)
+        end
     end
 
     return class_type
@@ -126,13 +200,19 @@ end
 --[[
 local baseClass = object_class("baseClass")
 function baseClass:ctor(a,b)
-    print("baseClass:ctor()",a,b)
+    print("baseClass:ctor()",a,b,self.class_name)
     self.name = "baseClass"
     self.a = a
     self.b = b
 end
 
+function baseClass.Get:Type()
+    print("baseClass.Get:Type()",self.class_name)
+    return "baseClass"
+end
+
 function baseClass:add()
+    self.a = self.a + self.b
     print(self.name,"add",self.a + self.b)
 end
 
@@ -148,6 +228,7 @@ function classA:ctor(a,b)
     self.b = b
 end
 
+
 function classA:__release()
     print("classA:release()")
 end
@@ -160,6 +241,10 @@ function classB:ctor(a,b)
     self.b = b
 end
 
+function classB.Set:Type(value)
+    print("classB.Set:Type()",self.class_name)
+end
+
 function classB:__release()
     print("classB:release()")
 end
@@ -170,6 +255,17 @@ function classC:ctor(a,b)
     self.name = "classC"
     self.a = a
     self.b = b
+    self.__type = 0
+    self.Type = 1
+end
+
+function classC.Get:Type()
+    return self.__type
+end
+
+function classC.Set:Type(value)
+    self.__type = value
+    print("set type ",value)
 end
 
 function classC:add()
@@ -180,6 +276,7 @@ function classC:__release()
     print("classC:release()")
 end
 
+-- 测试回收
 local test_num = 1000
 for i = 1,test_num,1 do
     local c = classC.new(i,i)
@@ -198,11 +295,36 @@ end
 
 assert(#object_pool.object_dic[classC] == test_num,string.format("#v = %s" , #object_pool.object_dic[classC] ))
 
+
+-- 测试继承
+
 local b = classB.new(100,59)
 b:add()
+b.c = 19
+assert(b.a == 159)
 b:__recycle()
 local c = classC.new(100,59)
 c:add()
+assert(c.a == 100 and c.c == nil)
 c:__recycle()
-c = classC.new(100,59)
+
+
+-- 测试 get set 的继承情况
+
+local b = classB.new(0,1)
+b.Type = "classB"
+
+print("b.Type = ",b.Type)
+print(b.Type,b.Get.Type,b.Set)
+assert(b.Type == "baseClass")
+
+local c = classC.new(0,1)
+c.Type = 100
+c.type = 9
+assert(rawget(c,"Type") == nil and c.Type == 100 and c.__type == 100)
+
+local a = classA.new(0,1)
+print(a.Type)
+assert(a.Type == "baseClass")
+
 --]]
