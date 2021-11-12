@@ -18,8 +18,11 @@ local _class_type = {
     class = 1,
     instance = 2,
 }
-
+local __object_pool = {}
+setmetatable(__object_pool,{__mode = "k"})
+object_class_pool = __object_pool
 local object_pool = {object_dic = {}}
+
 function object_pool:register(class_type)
     assert(class_type ~= nil)
     self.object_dic[class_type] = {}
@@ -27,16 +30,8 @@ end
 
 function object_pool:recycle(obj)
     local pool = self.object_dic[obj._class_type]
+    obj.__in_pool = true
     pool[#pool + 1] = obj
-    --[[
-    for k,v in pairs(obj) do
-        if k ~= '_class_type' and k ~= '__type' and k ~= '__recycle' and k ~= 'name' then
-            if obj._class_type[k] ~= v then
-                printRed("recycle diff",obj.class_name,k,v,obj._class_type[k] )
-            end
-        end
-    end
-    --]]
     --print("set object to pool",obj.name)
 end
 
@@ -59,14 +54,18 @@ function object_pool:claim(class_type,...)
             end
             create(class_type, ...)
         end
+        obj.__in_pool = false
         --print("get object from pool")
         return obj
     else
         -- 生成新对象
         local obj = {}
+        __object_pool[obj] = 0 -- 放入弱表，方便统计
         obj.class_name = class_type.class_name
         obj._class_type = class_type
+        obj.name = class_type.name
         obj.__type = _class_type.instance
+        obj.__in_pool = false
         local virtual_table = _class[class_type]
         local get = rawget(virtual_table,"Get")
         local set = rawget(virtual_table,"Set")
@@ -154,7 +153,6 @@ function object_class(class_name,super)
         end
     ,
         __index = function(t,k)
-            local v = virtual_table[k]
             if k == "Get" then
                 rawset(virtual_table,k,get)
                 return get
@@ -162,7 +160,7 @@ function object_class(class_name,super)
                 rawset(virtual_table,k,set)
                 return set
             else
-                return v
+                return virtual_table[k]
             end
         end,
     })
